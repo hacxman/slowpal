@@ -1,0 +1,258 @@
+#!/usr/bin/python
+import pyaudio
+import wave
+import time
+import sys
+
+import png
+from math import cos, sin, pi
+from PyQt5.QtCore import QPointF, QRect, QRectF, Qt, QTimer
+from PyQt5 import uic
+from PyQt5.QtGui import (QBrush, QColor, QFont, QLinearGradient, QPainter,
+        QPen, QSurfaceFormat)
+from PyQt5.QtWidgets import (QApplication, QGridLayout, QVBoxLayout, QLabel, QOpenGLWidget,
+        QWidget, QMainWindow)
+
+import numpy as np
+from scipy.signal import butter, lfilter, freqz
+import cmath
+
+W = 48
+
+def butter_lowpass(cutoff, fs, order=5):
+    nyq = 0.5 * fs
+    normal_cutoff = cutoff / nyq
+    b, a = butter(order, normal_cutoff, btype='low', analog=False)
+    return b, a
+
+def butter_lowpass_filter(data, cutoff, fs, order=5):
+    b, a = butter_lowpass(cutoff, fs, order=order)
+    y = lfilter(b, a, data)
+    return y
+
+def sinc_filter(s, f):
+    import numpy as np
+     
+    fc = f/44100.0 #0.11337  # Cutoff frequency as a fraction of the sampling rate (in (0, 0.5)).
+    b = 0.08  # Transition band, as a fraction of the sampling rate (in (0, 0.5)).
+    N = int(np.ceil((4 / b)))
+    if not N % 2: N += 1  # Make sure that N is odd.
+    n = np.arange(N)
+     
+    # Compute sinc filter.
+    h = np.sinc(2 * fc * (n - (N - 1) / 2.))
+     
+    # Compute Blackman window.
+    w = 0.42 - 0.5 * np.cos(2 * np.pi * n / (N - 1)) + \
+	0.08 * np.cos(4 * np.pi * n / (N - 1))
+     
+    # Multiply sinc filter with window.
+    h = h * w
+     
+    # Normalize to get unity gain.
+    h = h / np.sum(h)
+    s = np.convolve(s, h)
+    #print s
+    return s
+
+
+
+# define callback (2)
+t = 0
+firstsync = False
+imgdata = []
+_imgdata = []
+imgdata_size = 0
+import threading
+lock = threading.Lock()
+
+syncintegral = 0
+syncintegral_t = 0
+def callback(in_data, frame_count, time_info, status):
+    global t, firstsync, imgdata, _imgdata, imgdata_size
+    global lock
+    global syncintegral_t, syncintegral
+    #f = 7000
+    #f2 = 14000
+    #f, f2 = 9000, 9000
+    f, f2 = 44100/4.0, 44100/4.0 #1500, 3500
+#    in_data= map(ord, in_data)
+    od = 0
+    nzero = 0
+    signalD = []
+    signalU = []
+    signalV = []
+    tsync = 0
+    for i, d in list(enumerate(in_data))[::2]:
+        import struct
+        d = struct.unpack("=h", d+in_data[i+1])[0]
+#        print i, d
+#        d <<= 8
+#        d += in_data[i+1]-32767
+
+        dt = t + (i-tsync)/44100.0
+        #if not firstsync:
+        #    print dt*2*pi*f*1j
+        #    syncintegral += cmath.sin(dt*2*pi*f*1j)*d
+        #    syncintegral_t += 1
+        #    if syncintegral_t >= 30:
+        #        print abs(syncintegral_t)
+
+        if abs(d) < 250 and abs(od) < 250:
+            nzero += 1
+            firstsync = False
+        else:
+            nzero = 0 #max(0, nzero-1)
+        if nzero >= 30:
+            tsync = i-nzero
+            t = 0
+            nzero = 0
+            firstsync = True
+            print 'got synced'
+            with lock:
+                imgdata = _imgdata
+                _imgdata = []
+
+        od = d
+        u = -sin(dt*2*pi*f)*d #*(d/32767.0)*32767
+        v = cos(dt*2*pi*f2)*d #*(d/32767.0)*32767
+        y = d-(u+v)
+        if firstsync:
+            y = d
+#            _imgdata.append((127*y/24000, 127*u/24000, 127*v/24000))
+#            imgdata_size += 1
+            signalD.append(d)
+            signalU.append(u)
+            signalV.append(v)
+#    if imgdata_size >= 128*96*2:
+#        with lock:
+#            imgdata = _imgdata
+#            _imgdata = []
+#        imgdata_size = 0
+#        firstsync = False
+#        print 'unsync'
+    if firstsync:
+        signalU = sinc_filter(signalU, f)
+        signalV = sinc_filter(signalV, f2)
+        #signalD = sinc_filter(signalD, f)
+        #signalU = butter_lowpass_filter(signalU, f, 44100.0, order=4)
+        #signalV = butter_lowpass_filter(signalV, f2, 44100.0, order=4)
+        #signalD = butter_lowpass_filter(signalD, f, 44100.0)
+        for d,u,v in zip(signalD, signalU, signalV):
+            y = d-(u+v)
+            y = d
+##            print 127*y/18000, 127*u/18000, 127*v/18000
+            _imgdata.append((227*y/32000, 227*u/32000, 227*v/32000))
+            imgdata_size += 1
+
+    t += (frame_count-tsync)/44100.0
+    data = ""
+    return (data, pyaudio.paContinue)
+
+def clamp(x):
+    return max(0, min(255, x))
+
+class Ui(QMainWindow):
+    def __init__(self, parent=None):
+        super(Ui, self).__init__(parent)
+        uic.loadUi('palin.ui', self)
+        timer = QTimer(self)
+        timer.timeout.connect(self.animate)
+        timer.start(40)
+        self.oldimg = []
+
+    def animate(self):
+        self.repaint()
+        print 'anim'
+
+    def paintEvent(self, e):
+        global imgdata
+        global _imgdata
+        draw_imgdata = imgdata
+        if imgdata == []:
+            draw_imgdata = self.oldimg
+        self.oldimg = draw_imgdata
+
+        qp = QPainter()
+        qp.begin(self)
+        qp.scale(320/W,320/W)
+        xpos,ypos = 0,0
+        import copy
+        with lock:
+            mycopy = copy.copy(draw_imgdata)
+        for d in mycopy[::2]:
+            y,u,v = d #map(lambda a: a+127, (d[0], d[1],d[2]))
+            r = y+1.140*v
+            g = y-0.395*u-0.581*v
+            b = y+2.032*u
+            #print r,g,b
+            r,g,b=map(lambda a: clamp(50+1*(a)), [r,g,b])
+            #print r,g,b
+            try:
+                qp.setPen(QColor(r,g,b))
+            finally:
+                qp.drawPoint(xpos,ypos)
+            xpos+=1
+            if xpos >= W:
+                ypos += 1
+                xpos = 0
+
+        qp.end()
+
+
+def main():
+    # instantiate PyAudio (1)
+    p = pyaudio.PyAudio()
+    print p.get_host_api_count()
+    print p.get_default_output_device_info()
+    idx = 0
+    for i in range(p.get_host_api_count()):
+        print p.get_host_api_info_by_index(i)
+    for i in range(p.get_device_count()):
+        if p.get_device_info_by_index(i)['name'] == u'system':
+            idx = i
+
+
+    # open stream using callback (3)
+    stream = p.open(format=p.get_format_from_width(2),
+                    channels=1,
+                    rate=44100,
+                    input=True,
+                    input_device_index=idx,
+                    stream_callback=callback)
+
+    # start the stream (4)
+    stream.start_stream()
+    return stream, p
+
+#    # wait for stream to finish (5)
+#    while stream.is_active():
+#        time.sleep(0.1)
+#
+#    # stop stream (6)
+#    stream.stop_stream()
+#    stream.close()
+#    # close PyAudio (7)
+#    p.terminate()
+
+if __name__ == '__main__':
+
+    app = QApplication(sys.argv)
+
+    fmt = QSurfaceFormat()
+    fmt.setSamples(4)
+    QSurfaceFormat.setDefaultFormat(fmt)
+
+    window = Ui()
+    window.show()
+
+    stream, p = main()
+
+    ret = app.exec_()
+    # stop stream (6)
+    stream.stop_stream()
+    stream.close()
+    # close PyAudio (7)
+    p.terminate()
+
+    sys.exit(ret)
