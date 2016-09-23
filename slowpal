@@ -5,27 +5,96 @@ import time
 import sys
 
 import png
+from math import cos, sin, pi
 
 # define callback (2)
+t = 0
+t_int = 0
+imgdata = []
+img_w, img_h = 0, 0
+def sign(x):
+    return -1 if x < 0 else 1
 def callback(in_data, frame_count, time_info, status):
-
-    print timeinfo
+    global t, imgdata, img_w, img_h, t_int
+    #t = time_info['output_buffer_dac_time']
+#    t = time_info['current_time']
     data = []
+    #f = 7000
+    #2 = 14000
+    #f, f2 = 9000, 9000
+    f, f2 = 44100.0/4, 44100.0/4
     for i in xrange(frame_count):
-        data.append(0)
+        dt = i / 44100.0
+#        print t_int
+        r,g,b = 0,0,0
+        if t_int >= 0:
+            r = imgdata[t_int / img_w][3*(t_int % img_w)]/255.0
+            g = imgdata[t_int / img_w][3*(t_int % img_w)+1]/255.0
+            b = imgdata[t_int / img_w][3*(t_int % img_w)+2]/255.0
+
+        y =  0.299 * r + 0.587 * g + 0.114 * b
+#        u = -0.147 * r - 0.289 * g + 0.436 * b
+#        v =  0.615 * r - 0.515 * g - 0.100 * b
+#        print r,g,b, y, u, v
+        u = (b - y)*0.492
+        _v = (r - y)*0.877
+#        print y,u,_v
+#        print h,val
+#        print y, _i, q
+        v = int(sign(y)*3000+(y)*24000) #int((y+1)*sin((t+dt)*pi*f)*0.22127)
+        #lfe = sin((t+dt)*pi*700)
+
+        v += -int((u)*sin((t+dt)*pi*2*f)*18000)
+        v += int((_v)*cos((t+dt)*pi*2*f2)*18000)
+
+        #v = int((y-0.5)*18000) #int((y+1)*sin((t+dt)*pi*f)*0.22127)
+        #v = int(sin((t+dt)*5000)*10000)
+        if t_int <= 0:
+            #print 'black'
+            #v = int(sin((t+dt)*pi*2*44100/4.0)*24000)
+            v = 0
+        u = (v & 0xff00) >> 8
+        l = v & 0xff
+        data.append(l)
+        data.append(u)
+#        data.append(l)
+#        data.append(u)
+        if t_int <= 0:
+            t_int -= 1
+        else:    
+            t_int += 1 if i % 2 == 0 else 0
+        if t_int < -30:
+            t_int = 1
+        if t_int >= (img_w*img_h):
+            t_int = 0
+            print 'new frame'
+
+    t += frame_count/44100.0
+    if t_int == 0:
+        t = 0
+    data = str(bytearray(data))
     return (data, pyaudio.paContinue)
 
 
 def main():
     # instantiate PyAudio (1)
     p = pyaudio.PyAudio()
+    print p.get_host_api_count()
+    print p.get_default_output_device_info()
+    idx = 0
+    for i in range(p.get_host_api_count()):
+        print p.get_host_api_info_by_index(i)
+    for i in range(p.get_device_count()):
+        if p.get_device_info_by_index(i)['name'] == u'system':
+            idx = i
 
 
     # open stream using callback (3)
-    stream = p.open(format=p.get_format_from_width(wf.getsampwidth()),
-                    channels=wf.getnchannels(),
-                    rate=wf.getframerate(),
+    stream = p.open(format=p.get_format_from_width(2),
+                    channels=1,
+                    rate=44100,
                     output=True,
+                    output_device_index=idx,
                     stream_callback=callback)
 
     # start the stream (4)
@@ -38,10 +107,14 @@ def main():
     # stop stream (6)
     stream.stop_stream()
     stream.close()
-    wf.close()
-
     # close PyAudio (7)
     p.terminate()
 
 if __name__ == '__main__':
+    img = png.Reader(sys.argv[1])
+    global imgdata, img_w, img_h
+    img_w,img_h,imgdata,info = img.asRGB()
+    imgdata = list(imgdata)
+    print len(imgdata)
+#    exit(0)
     main()
